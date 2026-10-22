@@ -1,0 +1,699 @@
+---
+title: "Data6500_A2_Treasure"
+format: pdf
+editor: visual
+---
+
+
+```{r, include=FALSE}
+#loading necessary packages
+# Load required libraries
+library(sf)
+library(sp)
+library(raster)
+library(terra)
+library(tigris)
+library(tmap)
+library(ggplot2)
+library(spatstat)
+library(spatstat.geom)
+library(dplyr)
+library(osmdata)
+library(grid)
+library(gstat)
+library(tidyverse)
+
+```
+
+## Question 1
+
+#### Part A
+
+Plotting the graph of Wuhan's Human Seafood Wholesale Market
+
+```{r, include=FALSE}
+pop_density <- read.csv("C:/Users/mckay/OneDrive - University of Guelph/Masters/DATA 6500/Assignment_2/popdensity_allagegroups_whoproportions.csv")
+
+cases <- read.csv("C:/Users/mckay/OneDrive - University of Guelph/Masters/DATA 6500/Assignment_2/who_cases_dec-2019.csv")
+
+wuhan_bound <- st_read("C:/Users/mckay/OneDrive - University of Guelph/Masters/DATA 6500/Assignment_2/wuhan-boundary.shp")
+
+market <- st_read("C:/Users/mckay/OneDrive - University of Guelph/Masters/DATA 6500/Assignment_2/huanan_market.geojson")
+
+# head(cases)
+head(pop_density)
+# head(pop_cases)
+```
+
+```{r, fig.width=10, fig.height=8, echo=FALSE, warning=FALSE, results='hide', message=FALSE}
+#separating the linked cases and the unknown 
+cases_clean <- cases %>%
+  # filter(!is.na(huanan_linked)) %>%
+  mutate(linked_label = ifelse(
+    huanan_linked,
+    "Linked to the Huanan Market",
+    "No known link to the Huanan market"
+  ))
+
+#converting to an sf objecgt
+cases_sf <- st_as_sf(cases_clean, coords = c("longitude", "latitude"), crs = 4326)
+
+#converting the linked/unlinked cases to factor with correct levels
+cases_sf$linked_label <- factor(
+  cases_sf$linked_label,
+  levels = c("Linked to the Huanan Market", "No known link to the Huanan market")
+)
+
+#market coords
+market_lon <- 114.2574
+market_lat <- 30.61955
+
+# definign bounding box radius (approx. 5km)
+radius_deg <- 0.045  # roughly 5 km in degrees
+
+#building bounding box around the market (for zoom area)
+market_bbox <- c(
+  xmin = market_lon - radius_deg,
+  xmax = market_lon + radius_deg,
+  ymin = market_lat - radius_deg,
+  ymax = market_lat + radius_deg
+)
+
+#market bbox as sf
+market_box <- st_as_sfc(st_bbox(market_bbox, crs = st_crs(wuhan_bound)))
+
+#defining bounding box as a vector 
+bbox_vector <- c(
+  min_lon = market_bbox["xmin"],
+  min_lat = market_bbox["ymin"],
+  max_lon = market_bbox["xmax"],
+  max_lat = market_bbox["ymax"]
+)
+
+#getting the raods from OSM for within the bouding box
+roads <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "highway") %>%
+  osmdata_sf()
+
+#getting the rivers from OSM for within the bouding box
+rivers <- opq(bbox = bbox_vector) %>%
+  add_osm_feature(key = "waterway", value = "river") %>%
+  osmdata_sf()
+
+#to label market on map
+#create arrow from label point to market
+market_coords <- st_coordinates(market)[1, ]
+
+#set label position (adjust as needed)
+label_coords <- matrix(c(
+  market_coords[1] - 0.028,  # move further west
+  market_coords[2] + 0.005  # move slightly north
+), ncol = 2)
+
+arrow_line <- st_sf(
+  geometry = st_sfc(st_linestring(rbind(label_coords, market_coords))),
+  crs = 4326
+)
+
+#create label point
+label_point <- st_sf(
+  name = "Huanan market",
+  geometry = st_sfc(st_point(label_coords[1, ])),
+  crs = 4326
+)
+
+#making main map
+main_map <- tm_shape(wuhan_bound, bbox = st_bbox(market_box)) +
+  tm_borders(col = "gray80") +
+
+  tm_shape(roads$osm_lines) +
+  tm_lines(col = "gray50", lwd = 1, col_alpha = 0.6) +
+
+  tm_shape(rivers$osm_lines) +
+  tm_lines(col = "skyblue", lwd = 3, col_alpha = 0.5) +
+
+  tm_shape(cases_sf) +
+  tm_dots(
+    col = "linked_label",
+    palette = c(
+      "Linked to the Huanan Market" = "orange",
+      "No known link to the Huanan market" = "steelblue"
+    ),
+    size = 0.3,
+    legend.col.show = TRUE,
+    title.col = NULL
+  ) +
+
+  tm_shape(market) +
+  tm_symbols(
+    shape = 22,
+    col = "red",
+    size = 0.4,
+    border.col = "black",
+    legend.show = TRUE
+  ) +
+  
+  tm_shape(arrow_line) +
+  tm_lines(col = "black", lwd = 1.5) +
+
+  tm_shape(label_point) +
+  tm_text("name", size = 0.8, col = "black", bg.color = "white", bg.alpha = 1) +
+
+  # Add scalebar
+  tm_scalebar(
+    width = 5,
+    text.size = 0.6,
+    position = c("left", "bottom")
+  ) +
+
+  tm_layout(
+    legend.outside = FALSE,
+    legend.position = c("right", "top"),
+    legend.bg.color = "white",
+    legend.bg.alpha = 1,
+    legend.text.size = 0.5,         
+    legend.title.size = 0.01,       
+    inner.margins = c(0.01, 0.01, 0.01, 0.01),
+    frame = FALSE
+  ) +
+
+  tm_title("COVID-19 Cases Surrounding Huanan Market, Wuhan")
+
+# --- Inset map styled like the second image ---
+inset_map <- tm_shape(wuhan_bound) +
+  tm_fill(col = "grey80") +                     
+  tm_borders(col = "white", lwd = 0.5) +        
+
+  tm_shape(cases_sf) +
+  tm_dots(col = "black", size = 0.03) +         
+
+  tm_shape(market_box) +
+  tm_borders(lwd = 2, col = "red") + 
+  
+  tm_shape(market) +
+  tm_symbols(
+    shape = 22,
+    col = "red",
+    size = 0.2,
+    border.col = "black",
+    legend.show = TRUE
+  ) +
+
+  tm_layout(
+    frame = TRUE,                              
+    bg.color = "white",
+    title = "Area of detail",
+    title.size = 0.8
+  )
+
+#Display maps
+tmap_mode("plot")
+main_map
+
+# Inset map
+print(
+  inset_map,
+  vp = viewport(
+    x = 0.85,    # More to right
+    y = 0.3,    # Lower in corner
+    width = 0.35,
+    height = 0.35
+  )
+)
+
+```
+#### Part B
+
+Determining if the Huanan Market was a COVID-19 hot spot using KDE
+
+```{r, fig.width=8, fig.height=6, echo=FALSE, results='hide', message=FALSE, warning=FALSE}
+#filtering the comfired cases 
+confirmed_cases <- cases_sf %>% 
+  filter(confirmed == TRUE)
+
+#converting to a ppp object 
+#getting coordinates 
+confirmed_coords <- st_coordinates(confirmed_cases)
+
+#defining observation window from the bounding box 
+win <- owin(
+  xrange = range(confirmed_coords[,1]),
+  yrange = range(confirmed_coords[,2])
+)
+
+#creating the point pattern from the cases
+pp_cases <- ppp(x = confirmed_coords[,1], y = confirmed_coords[,2], window = win)
+
+#estimating the denisty 
+kde_cases <- density(pp_cases, sigma = 0.01)
+
+#making a raster to plot on the graph 
+kde_raster <- raster(kde_cases)
+
+#convert raster to `stars` or `terra` for plotting in `tmap`
+crs(kde_raster) <- "EPSG:4326"
+
+#to label market on map
+# Step 1: Create arrow from label point to market
+market_coords <- st_coordinates(market)[1, ]
+
+# Set label position (adjust as needed)
+label_coords <- matrix(c(
+  market_coords[1] - 0.030,  # move further west
+  market_coords[2] + 0.01  # move slightly north
+), ncol = 2)
+
+arrow_line <- st_sf(
+  geometry = st_sfc(st_linestring(rbind(label_coords, market_coords))),
+  crs = 4326
+)
+
+#creating a lable point
+label_point <- st_sf(
+  name = "Huanan market",
+  geometry = st_sfc(st_point(label_coords[1, ])),
+  crs = 4326
+)
+
+tmap_mode("plot")
+
+tm_shape(wuhan_bound, bbox = market_bbox) +
+  tm_borders(col = "gray80") +
+
+  tm_shape(roads$osm_lines) +
+  tm_lines(col = "gray50", lwd = 1, col_alpha = 0.6) +
+
+  tm_shape(rivers$osm_lines) +
+  tm_lines(col = "skyblue", lwd = 3, col_alpha = 0.5) +
+
+  #KDE raster
+  tm_shape(kde_raster) +
+  tm_raster(
+    palette = "YlOrRd",          
+    alpha = 0.6,
+    title = "Estimated Density"
+  ) +
+
+  #confirmed case points
+  tm_shape(confirmed_cases) +
+  tm_dots(
+    size = 0.2,
+    col = "black",
+    alpha = 0.8,
+    legend.show = FALSE
+  ) +
+
+  #arrow pointing to market
+  tm_shape(arrow_line) +
+  tm_lines(col = "black", lwd = 1.5) +
+
+  #label point
+  tm_shape(label_point) +
+  tm_text("name", size = 0.8, col = "black", bg.color = "white", bg.alpha = 1) +
+
+  #Huanan market symbol
+  tm_shape(market) +
+  tm_symbols(shape = 22, col = "red", size = 0.3, border.col = "black") +
+  
+  #lendend for cases
+  tm_add_legend(
+    type = "fill",         
+    col = "black",
+    labels = "Confirmed COVID-19 cases"
+  )
+
+  tm_layout(legend.outside = TRUE) +
+  tm_title("COVID-19 KDE with Huanan Market Label")
+```
+Based on the kernel density estimate (KDE) of confirmed COVID-19 cases, the Huanan Market appears to have been a significant hotspot for COVID-19 transmission. The market, represented by the red square, is situated within the highest-density region on the map, indicating a concentration of cases surrounding it. The spatial distribution pattern from the KDE suggests that the Huanan Market was a primary area of elevated transmission risk in the early outbreak phase.
+
+#### Part C
+While Part B suggests that the Huanan Market was a COVID-19 hotspot, this analysis does not account for the population density in Wuhan. To assess whether the market was truly a high-risk area when controlling for population distribution, an Inhomogeneous Poisson Point Process (IPPP) model will be applied. The IPPP model is well-suited for evaluating how case intensity varies spatially as a function of covariates, in this case, population density. Using population as a spatial covariate, the model will help determine whether the observed clustering near the market reflects genuine elevated risk or simply areas of higher population concentration.
+
+
+```{r, fig.width=8, fig.height=6, echo=FALSE, warning=FALSE, message=FALSE}
+#setting up the crs
+utm_crs <- "+proj=utm +zone=49 +datum=WGS84 +units=m +no_defs"
+
+#converting to utm cases to sf and transform to UTM
+cases_sf <- st_transform(cases_sf, crs = utm_crs)
+
+#extracting confirmed cases coordinates
+confirmed_cases <- cases_sf %>% filter(confirmed == TRUE)
+confirmed_coords <- st_coordinates(confirmed_cases)
+
+#defining the observation window
+win <- owin(
+  xrange = range(confirmed_coords[,1]),
+  yrange = range(confirmed_coords[,2])
+)
+
+#creating point pattern object
+pp_cases <- ppp(x = confirmed_coords[,1], y = confirmed_coords[,2], window = win)
+
+
+#converting population data to sf, project to UTM
+pop_sf <- st_as_sf(pop_density, coords = c("x", "y"), crs = 4326)
+pop_sf <- st_transform(pop_sf, crs = utm_crs)
+
+#creating a population raster
+pop_raster <- raster(extent(pop_sf),
+                     res = 250,  # 250 meters resolution
+                     crs = utm_crs)
+
+#rasterize population counts
+pop_raster <- rasterize(pop_sf, pop_raster, field = "value", fun = mean, background = 0)
+
+pop_mat <- as.matrix(pop_raster)
+
+pop_mat[pop_mat <= 0] <- 0.001 
+
+#creating im object from matrix
+#define x and y pixel centers using raster's extent and resolution
+x_coords <- seq(xmin(pop_raster), xmax(pop_raster), length.out = ncol(pop_raster))
+y_coords <- seq(ymin(pop_raster), ymax(pop_raster), length.out = nrow(pop_raster))
+
+#building im object
+pop_im <- im(mat = pop_mat,
+             xcol = x_coords,
+             yrow = y_coords)
+
+#fitting IPPP model using population as offset
+pop_ppm_model <- ppm(pp_cases ~ offset(log(pop_im)))
+
+#predicting intensity surface
+model_intensity <- predict(pop_ppm_model)
+
+model_raster <- raster(model_intensity)
+
+#assigning UTM CRS
+crs(model_raster) <- utm_crs
+
+#converitng raster to terra object
+model_raster_terra <- terra::rast(model_raster)
+
+#making sure everything is in the same crs again
+crs(model_raster_terra) <- utm_crs
+
+#reprojecting raster to EPSG:4326 (degrees)
+model_raster_4326 <- terra::project(model_raster_terra, "EPSG:4326")
+
+smoothed_raster <- focal(model_raster_4326, 
+                         w = matrix(1, 3, 3), 
+                         fun = mean, 
+                         na.rm = TRUE)
+
+#making the plot
+tmap_mode("plot")
+
+tm_shape(wuhan_bound, bbox = market_bbox) + 
+  tm_borders(col = "gray80") +
+
+  tm_shape(roads$osm_lines) +
+  tm_lines(col = "gray50", lwd = 1, col_alpha = 0.6) +
+
+  tm_shape(rivers$osm_lines) +
+  tm_lines(col = "skyblue", lwd = 3, col_alpha = 0.5) +
+  
+  tm_shape(model_raster_4326) +  # raster now in EPSG:4326
+  tm_raster(
+    alpha = 0.6,
+    palette = "YlOrRd",
+    title = "Adjusted Intensity"
+  ) +
+  
+  #Arrow pointing to market
+  tm_shape(arrow_line) +
+  tm_lines(col = "black", lwd = 1.5) +
+
+  # Market label with white background
+  tm_shape(label_point) +
+  tm_text("name", size = 0.8, col = "black", bg.color = "white", bg.alpha = 1) +
+
+  # Market symbol
+  tm_shape(market) +
+  tm_symbols(shape = 22, col = "red", size = 0.3, border.col = "black") +
+
+
+  tm_shape(cases_sf %>% st_transform(4326)) +  # cases in EPSG:4326
+  tm_dots(size = 0.04, col = "black", col_alpha = 0.5) +
+
+  tm_layout(legend.outside = TRUE) +
+  tm_title("IPPP Wuhan COVID-19 Risk with \nPopulation Density Accounted For")
+
+```
+
+After adjusting for population density using the IPPP model, the results indicate a relatively low case intensity surrounding the Huanan Market. This suggests that the apparent clustering of cases observed in Part B may be largely attributable to the high population density or mobility in that area, rather than elevated transmission risk associated with the market itself. Therefore, the concentration of cases near the market could reflect where people live or move, rather than the market being a hotspot for COVID-19 transmission.
+
+## Question 2
+
+Analysis of soil pH levels in Indiana.  Here the goal is to determine the counties in Indiana that have suitable soil profiles for agriculture.
+
+```{r, include=FALSE}
+#downloading the Indiana County Polygons
+indiana_counties <- counties(state = "IN", cb = TRUE, year = 2023, class = "sf")
+
+#getting the soil pH information 
+soil_info <- read.delim("C:/Users/mckay/OneDrive - University of Guelph/Masters/DATA 6500/Assignment_2/wosis_202312_phaq.tsv")
+
+head(soil_info)
+head(indiana_counties)
+```
+
+Since the provided soil dataset contains pH measurements from locations worldwide, it was necessary to isolate the data specific to Indiana for this analysis. To achieve this, the dataset was first filtered to include only records from the B horizon, as this horizon is the focus of the study. Based on a review of soil classification practices and the depth information available in the dataset, a new column was created to categorize the B horizon data into B1, B2, and B3 sublayers using the upper depth values. This approach ensured that sublayers were systematically included in the analysis and facilitated clearer visualisation. Finally, using spatial coordinates, the soil data was spatially joined to Indiana county boundaries, retaining only the soil measurements located within the state.
+
+```{r, include==FALSE}
+#filtering Horizon B soil information
+#want the soil information for the layers that start with B
+b_soil <- soil_info %>% 
+  filter(grepl("^B", layer_name))
+```
+
+```{r}
+
+#cleaning the B layer using the upper depth to determine what B Horizon each reading is 
+#eg: B1 <= 30, 30 < B2 <= 60, B3>60, everything else=other
+b_soil <- b_soil %>%
+  mutate(
+    # Categorize into B1, B2, B3 based on upper depth
+    depth_layer = case_when(
+      upper_depth <= 30                    ~ "B1",
+      upper_depth > 30 & upper_depth <= 60 ~ "B2",
+      upper_depth > 60                     ~ "B3",
+      TRUE                                 ~ "other"
+    )
+  )
+
+#making the depth layers a factor
+b_soil$depth_layer <- as.factor(b_soil$depth_layer)
+levels(b_soil$depth_layer)
+
+#head(b_soil)
+```
+
+```{r, include=FALSE}
+#making the information a sf object
+b_soil_sf <- st_as_sf(b_soil, coords = c("longitude", "latitude"), crs = 4326)
+
+#making sure the b_soil_sf and the Indiana counties have the same crs 
+b_soil_sf <- st_transform(b_soil_sf, st_crs(indiana_counties))
+
+#doing a spacial join with the Indiana counties downloaded and keeping only those points within 
+b_soil_sf <- st_join(b_soil_sf, indiana_counties, join = st_within) %>%
+  filter(!is.na(NAME))
+
+head(b_soil_sf)
+```
+
+```{r, fig.width=8, fig.height=6, echo=FALSE}
+#making a map of measurement locations in Indiana
+indiana_soil_plot <- ggplot() +
+  geom_sf(data = indiana_counties, fill = "white", color = "black") +
+  geom_sf(data = b_soil_sf, aes(color = depth_layer), size = 1) +
+  labs(title = "B Horizon Soil Sample Locations in Indiana",
+       color = "Layer Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+indiana_soil_plot
+```
+
+#### Analysis 
+
+Kriging was performed to identify counties with ideal soil pH levels between 6.0 and 7.5. For this analysis, block kriging was used, as the objective is to estimate average soil pH over entire counties, rather than at individual point locations. Block kriging is better suited for this purpose because it provides predictions over spatial areas (blocks), allowing for assessment of overall soil suitability at the county level.
+
+```{r, include=FALSE}
+# STEP 1: Prepare data
+
+#reprojecting to UTM Zone 16N (Indiana)
+b_soil_sf <- st_transform(b_soil_sf, 26916)
+indiana_counties <- st_transform(indiana_counties, 26916)
+
+#applying small jitter to avoid duplicate coordinates
+#adding a 1 meter jitter
+b_soil_sf <- st_jitter(b_soil_sf, amount = 1)   
+
+#converting to Spatial object
+soil_sp <- as(b_soil_sf, "Spatial")
+
+```
+Kriging was performed separately for each sublayer to account for the fact that different crops typically utilize different soil depths. Stratifying the analysis by sublayer allows for a clearer assessment of pH suitability within each depth horizon, supporting more targeted crop management based on sublayer-specific soil conditions.
+
+```{r, echo=FALSE}
+#subsetting the depth layers to perform separate kriging on each
+soil_sp_B1 <- soil_sp[soil_sp$depth_layer == "B1", ]
+soil_sp_B2 <- soil_sp[soil_sp$depth_layer == "B2", ]
+soil_sp_B3 <- soil_sp[soil_sp$depth_layer == "B3", ]
+
+```
+
+```{r}
+#B1 Variogram
+v_B1 <- variogram(value_avg ~ 1, soil_sp_B1)
+v_B1$Depth <- "B1"
+model_B1 <- fit.variogram(v_B1, vgm(model = "Exp"))
+
+#B2 Variogram
+v_B2 <- variogram(value_avg ~ 1, soil_sp_B2)
+v_B2$Depth <- "B2"
+model_B2 <- fit.variogram(v_B2, vgm(model = "Exp"))
+
+#B3 Variogram
+v_B3 <- variogram(value_avg ~ 1, soil_sp_B3)
+v_B3$Depth <- "B3"
+model_B3 <- fit.variogram(v_B3, vgm(model = "Exp"))
+
+v_all <- bind_rows(v_B1, v_B2, v_B3)
+
+#plotting all the of variograms for each B Horizon
+ggplot(v_all, aes(x = dist, y = gamma)) +
+  geom_point() +
+  geom_line() +  # optional, to connect points
+  facet_wrap(~Depth) +
+  labs(x = "Distance", y = "Semivariance", 
+       title = "Empirical Variograms by Depth Layer") +
+  theme_minimal()
+```
+The variograms show that soil pH variability increases with distance in all three sublayers (B1, B2, and B3), indicating spatial autocorrelation. The B1 layer shows lower variability, meaning pH values are more consistent at shallower depths, while the B2 and B3 layers show greater variability, suggesting deeper soils are less spatially consistent. This confirms that kriging is appropriate for this analysis, as the presence of spatial structure allows for reliable interpolation. The fitted variogram models will now be used to inform the kriging predictions for each sublayer.
+
+```{r, message=FALSE, results='hide'}
+#kiriging for each sublayer
+#B1 Block Kriging
+kriging_B1 <- krige(
+  value_avg ~ 1,
+  locations = soil_sp_B1,
+  newdata = as(indiana_counties, "Spatial"),
+  model = model_B1,
+  block = c(20000, 20000)
+)
+
+#B2 Block Kriging
+kriging_B2 <- krige(
+  value_avg ~ 1,
+  locations = soil_sp_B2,
+  newdata = as(indiana_counties, "Spatial"),
+  model = model_B2,
+  block = c(20000, 20000)
+)
+
+#B3 Block Kriging
+kriging_B3 <- krige(
+  value_avg ~ 1,
+  locations = soil_sp_B3,
+  newdata = as(indiana_counties, "Spatial"),
+  model = model_B3,
+  block = c(20000, 20000)
+)
+```
+
+```{r, echo=FALSE, warning=FALSE}
+# Convert kriging results to sf objects
+kriging_B1_sf <- st_as_sf(kriging_B1)
+kriging_B2_sf <- st_as_sf(kriging_B2)
+kriging_B3_sf <- st_as_sf(kriging_B3)
+
+# Add sublayer labels
+kriging_B1_sf$depth_layer <- "B1"
+kriging_B2_sf$depth_layer <- "B2"
+kriging_B3_sf$depth_layer <- "B3"
+
+# Function to classify based on pH range
+classify_pH <- function(pH) {
+  ifelse(pH >= 6.0 & pH <= 7.5, "Suitable", "Unsuitable")
+}
+
+# Classify each layer
+kriging_B1_sf$pH_suitability <- classify_pH(kriging_B1_sf$var1.pred)
+kriging_B2_sf$pH_suitability <- classify_pH(kriging_B2_sf$var1.pred)
+kriging_B3_sf$pH_suitability <- classify_pH(kriging_B3_sf$var1.pred)
+
+#combining the results 
+kriging_B1_sf$depth_layer <- "B1"
+kriging_B2_sf$depth_layer <- "B2"
+kriging_B3_sf$depth_layer <- "B3"
+
+kriging_combined_sf <- bind_rows(kriging_B1_sf, kriging_B2_sf, kriging_B3_sf)
+
+```
+
+```{r, fig.width=6, fig.height=6, echo=FALSE}
+#plot
+ggplot(kriging_combined_sf) +
+  geom_sf(aes(fill = pH_suitability)) +
+  scale_fill_manual(
+    values = c("Suitable" = "green", "Unsuitable" = "red"),
+    name = "Soil Suitability"
+  ) +
+  facet_wrap(~ depth_layer) +
+  labs(title = "Soil pH Suitability by Depth Layer (Block Kriging)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+The kriging results indicate that the uppermost B horizon (B1) has fewer counties with suitable soil pH compared to the deeper sublayers. This has implications for shallow-rooted crops, like strawberries, which primarily develop within the B1 layer and may therefore be limited by less optimal pH conditions. In contrast, deeper-rooted crops, such as fruit trees, which extend into the B2 and B3 sublayers, are likely to benefit from the more favorable pH conditions observed at these depths. Notably, the B3 sublayer shows the highest number of counties with suitable pH, suggesting that deeper soil layers may offer better agricultural potential in terms of pH suitability. 
+
+These results align with the variogram patterns, which showed lower variability and stronger spatial correlation in B1, leading to more uniform but unfortunately, less favorable predictions. The higher variability seen in the B2 and B3 variograms is reflected in the kriging maps as greater spatial variability, which allowed kriging to identify more scattered pockets of suitability. This suggests that while deeper soils are generally more suitable, they are also spatially more variable, especially in southern counties.
+
+```{r, echo=FALSE}
+#getting a count of how many counties have suitable soil for each layer
+
+#getting the counties' names 
+kriging_combined_sf$county_name <- indiana_counties$NAME
+
+# After filtering to suitable counties and dropping geometry:
+suitable_counties_df <- kriging_combined_sf %>%
+  st_drop_geometry() %>%
+  filter(pH_suitability == "Suitable") %>%
+  select(county_name, depth_layer) %>%
+  distinct()
+
+# Count how many suitable counties per depth layer:
+suitability_summary <- suitable_counties_df %>%
+  group_by(depth_layer) %>%
+  summarise(suitable_counties = n())
+
+print(suitability_summary)
+
+```
+
+```{r, echo=FALSE}
+#making a table with that shows the names of the suitable counties and what level they are suitable in 
+
+# Filter for Suitable counties
+suitable_counties <- kriging_combined_sf %>%
+  filter(pH_suitability == "Suitable") %>%
+  select(county_name, depth_layer) %>%
+  distinct()
+
+county_table <- suitable_counties %>%
+  mutate(suitable = "Yes") %>%   # Mark suitability
+  pivot_wider(
+    names_from = depth_layer,
+    values_from = suitable,
+    values_fill = "No"           
+  )
+
+county_table <- county_table %>% st_drop_geometry()
+
+print(county_table)
+```
