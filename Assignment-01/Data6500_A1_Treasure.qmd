@@ -1,0 +1,737 @@
+---
+title: "DATA*6500 Assignment 1"
+author: "Mckayla Treasure"
+date: "June 13, 2025"
+output: pdf
+fontsize: 12pt
+---
+
+```{r, include = FALSE}
+library(sf)
+library(spData)
+library(spDataLarge)
+#install.packages("spDataLarge", repos = "https://nowosad.github.io/drat/", type = "source")
+library(tidyverse)
+library(osmdata)
+library(ggplot2)
+library(terra)
+
+```
+
+```{r, include=FALSE}
+library(mlr3)
+library(mlr3learners)
+library(mlr3tuning)
+library(paradox)
+library(mlr3spatiotempcv)
+```
+# Question 1
+
+```{r, echo=FALSE}
+#loading in the data file for question 1
+
+q1_data <- load("C:/Users/mckay/Downloads/A1Q1.RData")
+q1_data
+```
+```{r, echo=FALSE}
+#inspecting the data sets
+head(ottawa_border)
+head(pull_wards)
+head(starbucks)
+head(ward_pops)
+
+```
+
+```{r, include=FALSE}
+#checking that each object is an sf object 
+class(ottawa_border)
+class(starbucks)
+class(pull_wards)
+```
+
+```{r}
+#making sure everything in the same CRS
+starbucks <- st_transform(starbucks, st_crs(ottawa_border))
+pull_wards <- st_transform(pull_wards, st_crs(ottawa_border))
+```
+
+## Part A
+
+Subsetting the Starbucks and pull_wards so only the ones in Ottawa are present
+
+```{r, echo=FALSE}
+#doing the subsets
+#ottawa starbs is getting the starbucks within Ottawa
+ottawa_strabs <- starbucks[st_within(starbucks, ottawa_border, sparse = FALSE),]
+
+#ottawa_wards are gettign the different wards within Ottawa
+ottawa_wards <- pull_wards[st_within(st_geometry(pull_wards), ottawa_border, sparse = FALSE),]
+```
+
+```{r}
+#making the plot of the map
+ottawa_starbs_map <- ggplot() +
+  geom_sf(data = ottawa_border, fill = NA, color = "black", size = 1) +
+  geom_sf(data = ottawa_wards, fill = "lightblue", alpha = 0.5) +
+  geom_sf(data = ottawa_strabs, color = "darkgreen", size = 2) +
+  ggtitle("Starbacks in the Wards of Ottawa") +
+  labs(caption = "Green dots indicate the locations of Starbucks in Ottawa.") +
+  theme_minimal()+
+  theme(plot.caption = element_text(hjust = 0)) 
+
+ottawa_starbs_map
+
+```
+
+## Part B
+
+Determining which ward has the most Starbucks per person and which wards have 0 Starbucks.
+
+```{r, echo=FALSE}
+head(ward_pops)
+```
+
+```{r}
+
+#joining the starbucks and the ward population data together
+wards_starbs <- st_join(ottawa_strabs, ottawa_wards, join = st_within)
+
+#counting the number of Starbucks per ward
+starbs_count <- as.data.frame(table(wards_starbs$name))
+colnames(starbs_count) <- c("Ward", "n_starbucks")
+
+head(starbs_count)
+```
+
+```{r}
+#calculating the Starbucks in each ward
+
+#getting the population data for each ward
+ward_info <- merge(ward_pops, starbs_count, by = "Ward", all.x = TRUE)
+
+
+#calculating the Starbucks per person in each ward
+ward_info$starbs_per_person <- ward_info$n_starbucks/ward_info$pop
+
+#want to have the wards with no Starbucks show 0
+ward_info$n_starbucks[is.na(ward_info$n_starbucks)] <- 0
+
+head(ward_info)
+
+```
+
+```{r}
+#finding the ward with the most Starbucks per person
+most_starbs <- ward_info[which.max(ward_info$starbs_per_person), ]
+
+#showing the wards with 0 Starbucks
+no_starbs <- sum(ward_info$n_starbucks == 0)
+
+#printing results 
+print(most_starbs[, c("Ward", "n_starbucks", "pop", "starbs_per_person")])
+cat("Wards with 0 Starbucks:", no_starbs, "\n")
+```
+
+The Knowxdale-Merivale has the most wards per person with 0.00075 Starbucks per person.  
+
+There are 3 wards that have no Starbucks.
+
+# Question 2
+
+```{r}
+#downloading the elevation raster and the border of Zion national park
+zion_elevation <- rast(system.file("raster/srtm.tif", package = "spDataLarge"))
+
+zion_park_poly <- read_sf(system.file("vector/zion.gpkg", package = "spDataLarge"))
+
+#transforming to WGS84 for OSM compatibility 
+zion_park <- st_transform(zion_park_poly, 4326)
+
+#extracting the bounding box for Zion National Park
+zion_bbox <- st_bbox(zion_park)
+bbox_vector <- c(zion_bbox["xmin"], zion_bbox["ymin"], zion_bbox["xmax"], zion_bbox["ymax"])
+```
+
+## Part A
+Dowloading the hiking trails and plotting them on the evelation raster data.
+
+I had to transform the Zion Park map to WGS84 (EPSG:4326) to ensure compatibility with OpenStreetMap (OSM) data. Initially, I was unable to query hiking trails from OSM because the map and the trail data were using different coordinate reference systems, which made spatial operations fail.
+
+Additionally, the elevation raster data was provided in a UTM projection, so after retrieving and processing the trails in WGS84, I needed to transform everything into the UTM CRS to correctly overlay the vector and raster layers. Consistent CRS alignment was essential for accurate spatial analysis and visualization.
+
+After a quick search on CHATGPT, I learnt that hiking trails are stored under the highway tag in OSM.  Therefore, the get this information about the hiking trails in Zion National Park, so the features with highway=path needed to be queried  to get all the information on walkable paths in the Zion National Park, since they are not labelled speicifcally as "hiking" trails in OSM.
+
+```{r}
+#dowloading the hiking trails from OSM
+zion_hike_trails <- opq(bbox = bbox_vector) %>% 
+  add_osm_feature(key = "highway", value = "path") %>% 
+  osmdata_sf()
+```
+
+
+```{r}
+#extracting the specific hiking trails as lines from OpenStreetMap
+hike_trails <- zion_hike_trails$osm_lines
+
+#making sure the trails are in the same CRS raster (UTM- not WGS84)
+trails <- st_transform(hike_trails, crs(zion_elevation))
+```
+
+```{r}
+#transforming the park boundary to the same CRS
+zion_park_crs <- st_transform(zion_park_poly, crs(zion_elevation))
+
+#converting to a vector so the raster could be cropped and masked to the shape of Zion National Park
+zion_vector <- vect(zion_park_crs)
+
+#cropping and masking raster
+elev_crop <- crop(zion_elevation, zion_vector)
+elev_mask <- mask(elev_crop, zion_vector)
+```
+
+```{r}
+#clipping the trails to only stay in the boundary of Zion National Park
+trails_clipped <- st_intersection(trails, zion_park_crs)
+
+#converting the raster to a dataframe so it can be plotted with ggplot2
+elev_df <- as.data.frame(elev_mask, xy = TRUE)
+colnames(elev_df)[3] <- "elevation"
+
+#making the plot
+ggplot() +
+  geom_raster(data = elev_df, aes(x = x, y = y, fill = elevation)) +
+  scale_fill_viridis_c(option = "C") +
+  geom_sf(data = trails_clipped, color = "green", size = 0.4) +
+  theme_minimal() +
+  labs(
+    title = "Hiking Trails in Zion National Park",
+    fill = "Elevation (m)"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+
+
+## Part B
+Highlighting Angel's Landing Trail
+
+```{r, include = FALSE}
+#checking the names of the trails
+names(trails)
+
+#filtering to find Angel's Landing
+angel_trail <- trails[grepl("angel", trails$name, ignore.case = TRUE), ]
+
+#checking the trail pulled is close to what the actual Angel's Landing trail
+plot(angel_trail$geometry)
+```
+
+From AllTrails, part of the West Rim Trail is combined with the Angles' Landing Trail to make the full Angels' Landing Hiking Trail.  Therefore, need to determine the where the trails meet up to determine where to cut the West Rim Trail.
+
+```{r, include=FALSE}
+west_rim_trail <- trails[grepl("west rim", trails$name, ignore.case = TRUE), ]
+# Combine both layers and get bounding box
+bbox <- st_bbox(rbind(west_rim_trail, angel_trail))
+
+
+#making a visual of the west rim and the angels landing trail
+plot(st_geometry(west_rim_trail),
+     col = "blue",
+     xlim = bbox[c("xmin", "xmax")],
+     ylim = bbox[c("ymin", "ymax")],
+     main = "West Rim & Angel's Landing Trails",
+     xlab = "Longitude", ylab = "Latitude")
+
+#adding Angel's Landing trail (red)
+plot(st_geometry(angel_trail), col = "red", add = TRUE)
+
+
+legend("bottomright", 
+       legend = c("West Rim Trail", "Angel's Landing Trail"),
+       col = c("blue", "red"),
+       lty = 1, lwd = 2,
+       bty = "n")
+
+```
+The above image indicates what line segments are going to be needed.  To get the full length of the trail as on https://www.alltrails.com/trail/us/utah/angels-landing-trail, I need to combine the red line with the blue line it intersects with to the south. OSM often breaks long trails into multiple segments which can be used to get the pieces of the West Rim Trail needed to make the full Angel's Landing Trail.
+
+```{r, include=FALSE}
+#checking the different line segments of the West Rim Trail
+nrow(west_rim_trail)
+
+# Check the IDs or names
+unique(west_rim_trail$name)
+unique(west_rim_trail$osm_id)  # if that column exists
+```
+
+```{r}
+#combining all trails to be plotted
+all_trails <- rbind(west_rim_trail, angel_trail)
+
+#making each segment of the West Rim Trail its own colour and the Angles' Landing a different colour
+segment_ids <- as.character(west_rim_trail$osm_id)
+segment_colors <- rainbow(length(segment_ids))
+all_colors <- c(segment_colors, "black")
+all_labels <- c(segment_ids, "Angel's Landing")
+
+#sizing the graph
+par(mar = c(4, 4, 5, 10))  
+
+#plotting the West Rim Trail with its different segments
+plot(st_geometry(west_rim_trail), col = segment_colors, lwd = 3,
+     main = "Angel's Landing and West Rim Trail Segments", cex.main = 1.5, xpd = TRUE)
+
+#adding the Angel's landing
+plot(st_geometry(angel_trail), col = "black", lwd = 1.5, add = TRUE)
+
+#legend
+legend("topright", inset = c(-0.25, 0), legend = all_labels,
+       col = all_colors, lty = 1, lwd = 3, title = "Trail Segments",
+       xpd = TRUE, cex = 0.8)
+
+```
+
+
+```{r}
+#making the full Angels Landing Trail using the ids of the different sections of the West Rim Trail
+
+#excluding these segments based on the graph
+exclude_ids <- c(14326789, 1215389944, 1014946428, 1014946429, 14326894)
+
+#trimming the trail to exclude the unneeded ids
+trim_west_rim <- west_rim_trail[!west_rim_trail$osm_id %in% exclude_ids,]
+
+#combining all the line segments
+full_angels_trail <- rbind(angel_trail, trim_west_rim)
+
+#merginging into a single line string 
+full_angels_trail <- st_union(full_angels_trail)
+full_angels_trail <- st_cast(full_angels_trail, "LINESTRING")
+
+#plot to confirm
+plot(st_geometry(full_angels_trail))
+
+```
+```{r}
+#making the Angels trail an sf object
+full_angels_trail <- st_sf(geometry = st_sfc(full_angels_trail), crs = st_crs(trails))
+```
+
+```{r}
+#remade plot with the Angels Landing Trail highlighted
+ggplot() +
+  geom_raster(data = elev_df, aes(x = x, y = y, fill = elevation)) +
+  scale_fill_viridis_c(option = "C") +
+
+  # All other trails
+  geom_sf(data = trails_clipped, color = "grey", size = 0.3) +
+
+  # Highlight Angel's Landing
+  geom_sf(data = full_angels_trail, color = "green", size = 1.2) +
+  
+
+  theme_minimal() +
+  labs(caption = "Green line highlights the Angel's Landing Trail.") +
+  labs(
+    title = "Hiking Trails in Zion National Park",
+    fill = "Elevation (m)",
+    xlab = "Latitude",
+    ylab = "Longitude"
+  )+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+```
+```{r}
+#making a more zoomed in graph of the Angel's Landing trail because it is hard to see on the full graph
+
+#making the bounding box for the zoomed in portion
+bbox_angels <- st_bbox(full_angels_trail)
+bbox_expanded <- bbox_angels + c(-0.01, -0.01, 0.01, 0.01)  # xmin, ymin, xmax, ymax
+
+#filtering the elevation raster to match 
+ggplot() +
+  geom_raster(data = elev_df, aes(x = x, y = y, fill = elevation)) +
+  scale_fill_viridis_c(option = "C") +
+  geom_sf(data = trails_clipped, color = "grey", size = 0.3) +
+  geom_sf(data = full_angels_trail, color = "green", size = 1.2) +
+  coord_sf(xlim = c(bbox_expanded["xmin"], bbox_expanded["xmax"]),
+           ylim = c(bbox_expanded["ymin"], bbox_expanded["ymax"])) +
+  labs(title = "Zoomed-In View: Angel's Landing Trail (Green)") +
+  theme_minimal()+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+## Part C
+Determining the elevation gain of the trail
+
+```{r}
+# Force projection to UTM Zone 12N (units = meters)
+angel_utm <- st_transform(full_angels_trail, crs = 32612)
+
+angel_line <- st_cast(angel_utm, "LINESTRING")
+
+#breaking the trail line segment into smaller segments 
+trail_points <- st_line_sample(angel_line, density = 1/3)
+trail_points <- st_cast(trail_points, "POINT")
+
+#converting to sf object
+trail_points <- st_sf(geometry = trail_points, crs = st_crs(angel_line))
+```
+
+```{r, results='hide'}
+trail_vect <- terra::vect(trail_points)
+
+#extracting the elevation 
+elev_values <- terra::extract(zion_elevation, trail_vect)
+
+#adding elevation to the points
+trail_points$elevation <- elev_values[, 2]
+```
+
+```{r}
+coords <- st_coordinates(trail_points)
+distances <- sqrt(diff(coords[,1])^2 + diff(coords[,2])^2)
+trail_points$distance <- c(0, cumsum(distances))
+```
+
+```{r}
+ggplot(trail_points, aes(x = distance, y = elevation)) +
+  geom_line(color = "darkgreen", size = 1) +
+  labs(
+    title = "Elevation Profile of Angel's Landing Trail",
+    x = "Distance along trail (meters)",
+    y = "Elevation (meters)"
+  ) +
+  theme_minimal()
+```
+
+```{r}
+# Compute elevation differences between consecutive points
+elev_diff <- diff(trail_points$elevation)
+
+# Keep only the positive (uphill) segments
+elev_gain <- sum(elev_diff[elev_diff > 0])
+
+# Print the total elevation gain
+cat("Total elevation gain along the trail is", round(elev_gain), "meters\n")
+```
+he elevation gain profile I generated does not exactly match the graph provided by AllTrails, but it follows the same general trend. Specifically, there is a steady increase in elevation from the beginning of the trail, leading up to a peak around the 3.0 to 3.4 km mark, consistent with the AllTrails profile.
+
+Some discrepancies may be due to additional trail length introduced during the stitching of trail segments, which could artificially increase both the total distance and cumulative elevation gain. Additionally, my elevation data was sampled at approximately every 3 meters, which may contribute to the more stepped or stair-like appearance of the graph, in contrast to the smoother incline shown on AllTrails.
+
+# Question 3
+
+Tuning and elestic net model to predict landslides.
+
+```{r, echo=FALSE}
+
+# rm(landslide_pred)
+# rm(lsl)
+
+#pulling in the data from the gis lab
+landslide_pred <- read.csv("C:/Users/mckay/Downloads/final_peru_data.csv")
+
+#loading in the lsl data
+data("lsl")
+
+head(lsl)
+names(lsl)
+class(lsl)
+
+head(landslide_pred)
+names(landslide_pred)
+class(landslide_pred)
+
+```
+
+```{r, echo=FALSE}
+#cleaning some of the columns in landslide_pred
+landslide_pred <- landslide_pred[, !names(landslide_pred) %in% c("ProductNam", "Source", "Source_URL", "OBJECTID_1", "OBJECTID", "Join_Count", "Join_Cou_1", "grid_cod_1", "pointid_1", "TARGET_F_1", "TARGET_FID", "pointid", "ID", "grid_code", "MeanElevat","MaxElevati", "MinElevati", "MeanAspect","MeanSlope", "MaxSlope")]
+
+#making the SEMResolute column and integer
+landslide_pred <- landslide_pred %>%
+  mutate(
+    DEMResolution_m = as.integer(gsub("m", "", DEMResolut))  # remove 'm' and convert to integer
+  ) %>%
+  select(-DEMResolut)  # drop the original column
+
+head(landslide_pred)
+
+```
+```{r, include=FALSE}
+#checking the coordinates match well enough to be able to bind the lslpts column to the larger dataset
+coords_lsl <- st_coordinates(st_as_sf(lsl, coords = c("x", "y"), crs = 32717))
+coords_pred <- st_coordinates(st_as_sf(landslide_pred, coords = c("x", "y"), crs = 32717))
+
+all.equal(coords_lsl, coords_pred, tolerance = 1e-6)
+
+```
+
+
+Noticed the information I pulled from the GIS lab was incorrect because I had the same values for the Slope and Curvature, so I used the gis_bridge on Courselink to get better slope and curvature values.  I then replaced my columns I had previously with the corrected data.
+
+```{r}
+#pulling in the data from the bridge
+#slope
+slope_r <- rast("C:/Users/mckay/Downloads/slope.tif")
+#plan curvature
+c_plan_r <- rast("C:/Users/mckay/Downloads/plan_curvature.tif")
+#profile curvature
+c_prof_r <- rast("C:/Users/mckay/Downloads/profile_curvature.tif")
+
+#converting the 'landslide_pred' data frame into a SpatVector of points
+#using the 'x' and 'y' columns for geometry, and assigning the CRS of 'slope_r'
+points <- vect(landslide_pred, geom = c("x", "y"), crs = crs(slope_r))
+
+#combining the 3 raster layers into one raster stack then extracting the information
+raster_stack <- c(slope_r, c_plan_r, c_prof_r)
+extracted <- extract(raster_stack, points)
+
+#replacing old Slope and Curvature
+landslide_pred$Slope <- extracted[, 2]
+#only using the plan curvature which give indication to flow direction
+#ie- down like in landslides
+landslide_pred$Curvature <- extracted[, 3]  
+```
+
+## Part A
+Merge the True/False variable from the lsl dataset to the data gathered in the GIS lab
+
+Decided to do a simple column bind because the data lined up correctly and wanted to make sure the correct true/false values ended up with the correct data.
+
+```{r, echo=FALSE}
+#adding the landslide true/false information to the points
+landslide_pred <- cbind(landslide_pred, lslpts = lsl$lslpts)
+head(landslide_pred)
+```
+
+
+```{r}
+ggplot(landslide_pred, aes(x = log10(Curvature), fill = lslpts)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density of Curvature by Landslide Presence",
+    x = "Curvature",
+    y = "Density",
+    fill = "Landslide"
+  ) +
+  scale_fill_manual(values = c("FALSE" = "red", "TRUE" = "skyblue")) +
+  theme_minimal()
+```
+
+```{r}
+ggplot(landslide_pred, aes(x = Z, fill = lslpts)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density of Elevation by Landslide Presence",
+    y = "Density",
+    x = "Elevation",
+    fill = "Landslide"
+  ) +
+  scale_fill_manual(values = c("FALSE" = "skyblue", "TRUE" = "red")) +
+  theme_minimal()
+```
+```{r}
+ggplot(landslide_pred, aes(x = log10(Slope), fill = lslpts)) +
+  geom_density(alpha = 0.5) +
+  labs(
+    title = "Density of Slope by Landslide Presence",
+    y = "Density",
+    x = "Slope",
+    fill = "Landslide"
+  ) +
+  scale_fill_manual(values = c("FALSE" = "skyblue", "TRUE" = "red")) +
+  theme_minimal()
+```
+The denisty graphs for slope, elevation and curvature indicate thar there might be some relation between these variables and whether landslides occur because of the overlap between graphs.  Therefore, they will be used in the interaction term in the next part of the question.
+
+## Part B
+Fitting models:
+
+Model 1: with interactions (slope/curvature/elevation)
+
+Model 2: without interactions
+
+Setting up the tasks:
+```{r}
+landslide_pred[] <- lapply(landslide_pred, function(col) {
+  if (is.character(col)) as.factor(col) else col
+})
+
+landslide_pred$Slope_Curv_Elev <- with(landslide_pred, Slope * Curvature * Z)
+
+# # Model 2: Exclude elevation (Z), Slope, Curvature
+baseline <- landslide_pred[, !names(landslide_pred) %in% c("Slope_Curv_Elev")]
+
+#setting up the task for model 1- with interaction
+task_mod1 = mlr3spatiotempcv::TaskClassifST$new(
+                       id = "interaction_model",
+                       backend = mlr3::as_data_backend(landslide_pred),
+                       target = "lslpts",
+                       positive = "TRUE", 
+                       coordinate_names = c("x", "y"),
+                       coords_as_features = FALSE, 
+                       crs = "EPSG:32717")
+
+#setting up task for model 2- without interaction- baseline model
+task_mod2 = mlr3spatiotempcv::TaskClassifST$new(
+                       id = "baseline",
+                       backend = mlr3::as_data_backend(baseline),
+                       target = "lslpts",
+                       positive = "TRUE", 
+                       coordinate_names = c("x", "y"),
+                       coords_as_features = FALSE, 
+                       crs = "EPSG:32717")
+```
+
+Setting up the Elastic-Net Learner:
+
+```{r}
+#defining the learner- Elastic Net logistic regression learner
+learner_glmnet <- lrn("classif.glmnet", predict_type = "prob")
+
+#2D search for best alpha and lambda
+search_space <- ps(
+  alpha = p_dbl(lower = 0, upper = 1),
+  lambda = p_dbl(lower = 1e-4, upper = 1)
+)
+
+#adding 5 fold-cross validation 
+cross_val <- rsmp("cv", folds = 5)
+
+#grid search 
+grid_search <- tnr("grid_search", resolution = 5)
+
+#adding terminator 
+terminator <- trm("evals", n_evals = 25)
+
+#AutoTuner for Model 1 (with interaction)
+auto_glmnet_mod1 <- AutoTuner$new(
+  learner = learner_glmnet$clone(),  # clone so each gets its own learner
+  resampling = cross_val,
+  measure = msr("classif.auc"),
+  search_space = search_space,
+  tuner = grid_search,
+  terminator = terminator
+)
+
+#AutoTuner for Model 2 (baseline)
+auto_glmnet_mod2 <- AutoTuner$new(
+  learner = learner_glmnet$clone(),
+  resampling = cross_val,
+  measure = msr("classif.auc"),
+  search_space = search_space,
+  tuner = grid_search,
+  terminator = terminator
+)
+
+```
+
+Training the model on both tasks 
+
+```{r, results='hide'}
+#training on all variables
+auto_glmnet_mod1$train(task_mod1)
+pred_mod1 <- (auto_glmnet_mod1$predict(task_mod1))
+
+#training of baseline- no interaction
+auto_glmnet_mod2$train(task_mod2)
+pred_mod2 <- (auto_glmnet_mod2$predict(task_mod2))
+```
+
+## Part C
+Comparing models
+
+```{r}
+#making the outer resampling 
+outer_resample <- rsmp("spcv_coords", folds = 5)
+
+#making the inner resampling 
+inner_resample <- rsmp("cv", folds = 5)
+
+#setting up the AutoTuner with the same process as above
+terminator <- trm("evals", n_evals =25)
+tuner <- tnr("grid_search", resolution =5)
+
+search_space <- ps(
+  alpha = p_dbl(lower = 0, upper =1),
+  lambda = p_dbl(lower = 1e-4, upper =1)
+)
+  
+  lerner_glmnet <- lrn("classif.glmnet", predict_type = "prob")
+  
+#creating the AutoTuner for each task
+auto_mod1 <- AutoTuner$new(
+  learner = learner_glmnet,
+  resampling = inner_resample,
+  measure = msr("classif.auc"),
+  search_space = search_space,
+  tuner = tuner,
+  terminator = terminator, 
+  id = "glmnet_mod1"
+)
+
+auto_mod2 <- AutoTuner$new(
+  learner = learner_glmnet,
+  resampling = inner_resample,
+  measure = msr("classif.auc"),
+  search_space = search_space,
+  tuner = tuner,
+  terminator = terminator,
+  id = "glmnet_mod2"
+)
+
+```
+
+```{r, results='hide'}
+design <- rbind(
+  benchmark_grid(task_mod1, auto_mod1, outer_resample),
+  benchmark_grid(task_mod2, auto_mod2, outer_resample)
+)
+
+# Run the benchmark
+bmr <- invisible(benchmark(design))
+
+# Aggregate AUC results
+auc_results <- invisible(bmr$aggregate(msr("classif.auc")))
+```
+
+```{r}
+print(auc_results[, c("task_id", "learner_id", "classif.auc")])
+
+```
+
+##Part D
+Plotting the distribution of the predicted probablities of the better model.
+
+Model 2, without the interaction term, is the better model because the AUC for both those model using task 2 were higher.  A higher AUC, indicates the model is more accurate.
+
+```{r}
+# Predict using the better model
+pred <- auto_glmnet_mod2$predict(task_mod2)
+
+# Get the predicted probabilities and true labels
+df_pred <- data.frame(
+  prob = pred$prob[, "TRUE"],  # probability of landslide = TRUE
+  truth = pred$truth
+)
+
+# Plot the distributions
+ggplot(df_pred, aes(x = prob, fill = truth)) +
+  geom_density(alpha = 0.6) +
+  labs(
+    title = "Distribution of Predicted Probabilities",
+    x = "Predicted Probability of Landslide = TRUE",
+    y = "Density",
+    fill = "Actual Landslide"
+  ) +
+  scale_fill_manual(values = c("TRUE" = "skyblue", "FALSE" = "red")) +
+  theme_minimal()
+```
+
+The distribution graph was plotted using the baseline model, which did not include the interaction term between slope, curvature and elevation.  Therefore, this interaction term did not help with predicting landslides.  The graph itself looks reliable because the two classes are separated well on the graph.  The true curve is peaking closer to 1 and the false curve is peaking closer to zero.  However, there is still a sizable area that is overlapped between the two curves, which indicated where the model was unsure about whether a landslide occurred or not.
+
+The baseline model outperformed the interaction model in terms of AUC. A likely reason is that the interaction term (Slope × Curvature × Elevation) introduced unnecessary complexity or noise into the model. This could have led to overfitting during training, reducing generalization performance when tested on new data. Additionally, the interaction may not have provided unique predictive information beyond what each variable already contributed individually.
